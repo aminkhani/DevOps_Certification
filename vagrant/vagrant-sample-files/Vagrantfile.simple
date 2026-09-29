@@ -1,0 +1,31 @@
+BOX = "bento/ubuntu-24.04"          # name of your local box (see note below)
+BRIDGE = "wlp9s0"                   # your network interface (see note below)
+
+NODES = [
+    { name: "master",  ip: "192.168.70.10", memory: 2048, cpus: 2 },
+    { name: "worker1", ip: "192.168.70.11", memory: 1024, cpus: 1 },
+    { name: "worker2", ip: "192.168.70.12", memory: 1536, cpus: 2 },
+    { name: "worker3", ip: "192.168.70.13", memory: 1536, cpus: 2 },
+]
+
+Vagrant.configure("2") do |config|
+    config.vm.box = BOX
+
+    NODES.each do |node|
+        config.vm.define node[:name] do |n|
+        n.vm.hostname = node[:name]
+        n.vm.network "public_network", ip: node[:ip], bridge: BRIDGE
+
+        n.vm.provider "virtualbox" do |vb|
+        vb.name   = node[:name]
+        vb.memory = node[:memory]
+        vb.cpus   = node[:cpus]
+    end
+
+        # let every machine resolve the others by name
+        n.vm.provision "shell", inline: <<-SHELL
+        #{NODES.map { |x| "grep -q #{x[:name]} /etc/hosts || echo '#{x[:ip]} #{x[:name]}' >> /etc/hosts" }.join("\n        ")}
+        SHELL
+        end
+    end
+end

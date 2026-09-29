@@ -1,0 +1,114 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# ---------------------------------------------------------------------------
+# Global settings
+# ---------------------------------------------------------------------------
+BOX    = "bento/ubuntu-24.04"   # base box used by every VM
+BRIDGE = "wlp9s0"               # host network interface used for the bridged adapter
+                                # (check yours with: ip -br a)
+
+# One entry per VM. Add or remove nodes here, nothing else needs to change.
+# Workers use 1 vCPU / 1 GB: with 4 VMs on one host, giving each 2 vCPUs
+# oversubscribes the CPU, which starves guests during boot and causes
+# "Connection reset. Retrying..." SSH errors.
+NODES = [
+    { name: "master",  ip: "192.168.70.10", memory: 2048, cpus: 2 },
+    { name: "worker1", ip: "192.168.70.11", memory: 1024, cpus: 1 },
+    { name: "worker2", ip: "192.168.70.12", memory: 1024, cpus: 1 },
+    { name: "worker3", ip: "192.168.70.13", memory: 1024, cpus: 1 },
+]
+
+# Build the "IP name" lines once (used by the hosts provisioner below).
+HOSTS_ENTRIES = NODES.map { |x| "#{x[:ip]} #{x[:name]}" }.join("\n")
+
+Vagrant.configure("2") do |config|
+    config.vm.box = BOX
+
+    # Don't check for a newer box version on every `vagrant up` (saves time and
+    # network). Update manually when you want: vagrant box update
+    config.vm.box_check_update = false
+
+    # Wait up to 10 minutes for SSH instead of the default 5. Gives slow boots
+    # room to finish instead of failing.
+    config.vm.boot_timeout = 600
+
+    # Disable the default /vagrant shared folder. It removes the Guest Additions
+    # version-mismatch warning (box has 7.2.4, host has 7.0) and one mount step
+    # at boot. Remove this line if you really need to share files with the host.
+    config.vm.synced_folder ".", "/vagrant", disabled: true
+
+    # -------------------------------------------------------------------------
+    # Settings applied to ALL VirtualBox VMs
+    # -------------------------------------------------------------------------
+    config.vm.provider "virtualbox" do |vb|
+    # Linked clones share the base box disk and store only each VM's changes.
+    # VM creation takes seconds instead of copying the full disk, and it
+    # saves several GB. (Don't delete the base box while clones exist.)
+    vb.linked_clone = true
+
+    # Skip the Guest Additions version check/warning on boot.
+    vb.check_guest_additions = false
+
+    # Enable the I/O APIC (needed for more than one vCPU and better interrupt
+    # handling).
+    vb.customize ["modifyvm", :id, "--ioapic", "on"]
+
+    # Remove hardware the cluster doesn't need (small savings per VM).
+    vb.customize ["modifyvm", :id, "--audio", "none"]
+    vb.customize ["modifyvm", :id, "--usb", "off"]
+
+    # Let the guest use the host's DNS resolver through NAT (more reliable
+    # name resolution inside the VMs).
+    vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+
+    # Uncomment to see the VM console window. Useful when debugging a VM that
+    # hangs at boot.
+    # vb.gui = true
+    end
+
+  # -------------------------------------------------------------------------
+  # Per-VM settings
+  # -------------------------------------------------------------------------
+    NODES.each do |node|
+        config.vm.define node[:name] do |n|
+            n.vm.hostname = node[:name]
+
+            # Adapter 2: bridged to the host's Wi-Fi with a static IP.
+            # Caveat: this only works if your router really uses 192.168.70.0/24,
+            # and some access points block extra MAC addresses on Wi-Fi.
+            # For a lab that only needs VM-to-VM/host access, a host-only network
+            # is more stable:
+            #   n.vm.network "private_network", ip: node[:ip]
+            n.vm.network "public_network", ip: node[:ip], bridge: BRIDGE
+
+            # Per-VM name and resources (taken from the NODES table above).
+            n.vm.provider "virtualbox" do |vb|
+            vb.name   = node[:name]
+            vb.memory = node[:memory]
+            vb.cpus   = node[:cpus]
+        end
+
+        # Let every machine resolve the others by name.
+        # Idempotent: it deletes the previously added block (between the two
+        # marker comments) and writes a fresh one, so re-running
+        # `vagrant provision` never duplicates lines and picks up IP changes.
+        # (The old `grep -q name` check could match substrings and never
+        # updated a changed IP.)
+        n.vm.provision "shell", inline: <<~SHELL
+        sed -i '/# vagrant-cluster-begin/,/# vagrant-cluster-end/d' /etc/hosts
+        cat >> /etc/hosts <<EOF
+            # vagrant-cluster-begin
+            #{HOSTS_ENTRIES}
+            # vagrant-cluster-end
+            EOF
+            SHELL
+        end
+    end
+end
+
+# ---------------------------------------------------------------------------
+# Suggested startup order (keeps host load low):
+#   vagrant up master
+#   vagrant up worker1 worker2 worker3 --parallel   # drop --parallel if the host struggles
+# ---------------------------------------------------------------------------
